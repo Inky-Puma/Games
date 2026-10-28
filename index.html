@@ -28,7 +28,7 @@
 
       html, body {
         margin: 0;
-        height: 100%;
+        min-height: 100%;
         background:
           radial-gradient(circle at top left, rgba(124, 156, 255, 0.18), transparent 30%),
           radial-gradient(circle at bottom right, rgba(143, 104, 255, 0.18), transparent 30%),
@@ -102,12 +102,6 @@
         padding: 16px 18px 14px;
         display: grid;
         gap: 12px;
-      }
-
-      .top-actions {
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
       }
 
       .toolbar {
@@ -424,13 +418,13 @@
         const repo = "Games";
         const branch = "main";
         const contentUrl = `https://api.github.com/repos/${owner}/${repo}/contents?ref=${branch}`;
+        const storageKey = "gamesLauncherLocalFiles";
 
         const state = {
           games: [],
           selectedGame: null,
           activeCategory: "All",
-          sortMode: "name-asc",
-          lastLoadedHtml: ""
+          sortMode: "name-asc"
         };
 
         const statusEl = document.getElementById("status");
@@ -450,6 +444,17 @@
           statusEl.className = `status${type ? ` ${type}` : ""}`;
         }
 
+        function readLocalGames() {
+          try {
+            const raw = localStorage.getItem(storageKey);
+            if (!raw) return [];
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed.filter(item => item && item.name && item.html) : [];
+          } catch (error) {
+            return [];
+          }
+        }
+
         function normalizeCategoryName(rawName) {
           const cleaned = String(rawName || "game")
             .replace(/\.(html?|htm)$/i, "")
@@ -462,27 +467,55 @@
 
           if (!cleaned) return "General";
 
-          const match = cleaned.match(/^(.*?)(?:\s+\d+(?:[A-Za-z.-]+)?)$/);
-          const seriesName = match ? match[1].trim() : cleaned;
-
-          if (!seriesName || seriesName.length < 2) return "General";
-
-          return seriesName
+          const ranked = cleaned.match(/^(.*?)(?:\s+\d+(?:[A-Za-z.-]+)?)$/);
+          const base = ranked ? ranked[1].trim() : cleaned;
+          return (base || cleaned)
             .replace(/\s+and\s+/gi, " ")
             .replace(/\s+/g, " ")
-            .trim();
+            .trim() || "General";
         }
 
-        function makeGameEntry(item) {
-          const name = item.name || "game.html";
+        function buildRemoteGame(item) {
           return {
-            id: item.sha || name,
-            name,
-            path: item.path || name,
-            category: normalizeCategoryName(name),
-            url: item.download_url || item.url,
-            rawUrl: item.download_url || item.url
+            id: `remote-${item.sha || item.name}`,
+            name: item.name,
+            category: normalizeCategoryName(item.name),
+            type: "remote",
+            rawUrl: item.download_url || item.url,
+            source: "GitHub"
           };
+        }
+
+        function buildLocalGame(item) {
+          return {
+            id: `local-${item.id || item.name}`,
+            name: item.name,
+            category: normalizeCategoryName(item.name),
+            type: "local",
+            html: item.html || "",
+            source: "Local"
+          };
+        }
+
+        function mergeGames(remoteGames, localGames) {
+          const map = new Map();
+
+          remoteGames.forEach((game) => map.set(String(game.name).toLowerCase(), game));
+          localGames.forEach((game) => map.set(String(game.name).toLowerCase(), game));
+
+          return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+        }
+
+        function getGameHtml(game) {
+          if (game.type === "local") {
+            return Promise.resolve(game.html || "<html><body>Empty upload.</body></html>");
+          }
+
+          return fetch(game.rawUrl)
+            .then((response) => {
+              if (!response.ok) throw new Error("Fetch failed");
+              return response.text();
+            });
         }
 
         function filterGames() {
@@ -518,7 +551,7 @@
         }
 
         function renderCategories() {
-          const categories = ["All", ...new Set(state.games.map((game) => game.category))];
+          const categories = ["All", ...new Set(state.games.map((game) => game.category || "General"))];
           categoryStrip.innerHTML = "";
 
           categories.forEach((category) => {
@@ -534,80 +567,6 @@
           });
         }
 
-        function renderGameList() {
-          const visible = sortGames(filterGames());
-          gameList.innerHTML = "";
-
-          if (!visible.length) {
-            const empty = document.createElement("div");
-            empty.style.padding = "18px 0";
-            empty.style.color = "var(--muted)";
-            empty.textContent = "No games match the current search.";
-            gameList.appendChild(empty);
-            return;
-          }
-
-          visible.forEach((game) => {
-            const item = document.createElement("div");
-            item.className = `game-item${state.selectedGame && state.selectedGame.id === game.id ? " selected" : ""}`;
-
-            const active = state.selectedGame && state.selectedGame.id === game.id;
-
-            item.innerHTML = `
-              <div class="game-header">
-                <div style="display:flex;align-items:flex-start;gap:12px;flex:1;min-width:0;">
-                  <div class="game-icon">${(game.name || "G").slice(0, 2).toUpperCase()}</div>
-                  <div style="min-width:0;flex:1;">
-                    <p class="game-name">${game.name}</p>
-                    <div class="game-meta">
-                      <span>${game.category}</span>
-                      <span>•</span>
-                      <span>HTML</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div class="game-actions">
-                <button class="mini-btn primary" type="button" data-role="launcher" data-id="${game.id}">Launch</button>
-                <button class="mini-btn" type="button" data-role="blank" data-id="${game.id}">Open in about:blank</button>
-              </div>
-            `;
-
-            item.addEventListener("click", (event) => {
-              const trigger = event.target.closest("button");
-              if (!trigger) {
-                state.selectedGame = game;
-                previewTitle.textContent = game.name;
-                loadGameIntoPreview(game);
-                renderGameList();
-                return;
-              }
-
-              const role = trigger.getAttribute("data-role");
-              const fileId = trigger.getAttribute("data-id");
-              const selected = state.games.find((entry) => entry.id === fileId) || game;
-
-              if (role === "launcher") {
-                state.selectedGame = selected;
-                previewTitle.textContent = selected.name;
-                loadGameIntoPreview(selected);
-                renderGameList();
-              }
-
-              if (role === "blank") {
-                openGameInBlank(selected);
-              }
-            });
-
-            gameList.appendChild(item);
-          });
-        }
-
-        function render() {
-          renderCategories();
-          renderGameList();
-        }
-
         function openGameInBlank(game) {
           const win = window.open("about:blank", "_blank");
           if (!win) {
@@ -615,8 +574,7 @@
             return;
           }
 
-          fetch(game.rawUrl || game.url)
-            .then((response) => response.text())
+          getGameHtml(game)
             .then((html) => {
               win.document.open();
               win.document.write(html);
@@ -637,10 +595,8 @@
           previewFrame.classList.remove("hidden");
           previewFrame.srcdoc = "";
 
-          fetch(game.rawUrl || game.url)
-            .then((response) => response.text())
+          getGameHtml(game)
             .then((html) => {
-              state.lastLoadedHtml = html;
               previewFrame.srcdoc = html;
             })
             .catch(() => {
@@ -648,21 +604,104 @@
             });
         }
 
-        function fetchGameList() {
-          setStatus("Loading game library...", "");
+        function renderGameList() {
+          const visible = sortGames(filterGames());
+          gameList.innerHTML = "";
 
-          fetch(contentUrl, { headers: { Accept: "application/vnd.github+json" } })
+          if (!visible.length) {
+            const empty = document.createElement("div");
+            empty.style.padding = "18px 0";
+            empty.style.color = "var(--muted)";
+            empty.textContent = "No games match the current search.";
+            gameList.appendChild(empty);
+            return;
+          }
+
+          visible.forEach((game) => {
+            const item = document.createElement("div");
+            item.className = `game-item${state.selectedGame && state.selectedGame.id === game.id ? " selected" : ""}`;
+
+            item.innerHTML = `
+              <div class="game-header">
+                <div style="display:flex;align-items:flex-start;gap:12px;flex:1;min-width:0;">
+                  <div class="game-icon">${(game.name || "G").slice(0, 2).toUpperCase()}</div>
+                  <div style="min-width:0;flex:1;">
+                    <p class="game-name">${game.name}</p>
+                    <div class="game-meta">
+                      <span>${game.category || "General"}</span>
+                      <span>•</span>
+                      <span>${game.type === "local" ? "Local" : "GitHub"}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="game-actions">
+                <button class="mini-btn primary" type="button" data-role="launcher" data-id="${game.id}">Launch</button>
+                <button class="mini-btn" type="button" data-role="blank" data-id="${game.id}">Open in about:blank</button>
+              </div>
+            `;
+
+            item.addEventListener("click", (event) => {
+              const trigger = event.target.closest("button");
+              if (!trigger) {
+                state.selectedGame = game;
+                previewTitle.textContent = game.name;
+                loadGameIntoPreview(game);
+                render();
+                return;
+              }
+
+              const role = trigger.getAttribute("data-role");
+              const id = trigger.getAttribute("data-id");
+              const selected = state.games.find((entry) => entry.id === id) || game;
+
+              state.selectedGame = selected;
+              previewTitle.textContent = selected.name;
+
+              if (role === "launcher") {
+                loadGameIntoPreview(selected);
+                setStatus(`Launching “${selected.name}” in the launcher preview.`, "ok");
+              }
+
+              if (role === "blank") {
+                openGameInBlank(selected);
+              }
+
+              render();
+            });
+
+            gameList.appendChild(item);
+          });
+        }
+
+        function render() {
+          renderCategories();
+          renderGameList();
+        }
+
+        function fetchRemoteGames() {
+          return fetch(contentUrl, { headers: { Accept: "application/vnd.github+json" } })
             .then((response) => {
               if (!response.ok) throw new Error("GitHub API failed");
               return response.json();
             })
             .then((items) => {
               if (!Array.isArray(items)) throw new Error("Unexpected game list");
-
-              state.games = items
+              return items
                 .filter((item) => item && item.type === "file" && /\.html?$/i.test(item.name))
-                .map(makeGameEntry)
-                .sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+                .map(buildRemoteGame);
+            });
+        }
+
+        function loadAllGames() {
+          setStatus("Loading game library...", "");
+
+          Promise.all([
+            fetchRemoteGames(),
+            Promise.resolve(readLocalGames().map(buildLocalGame))
+          ])
+            .then(([remoteGames, localGames]) => {
+              state.games = mergeGames(remoteGames, localGames);
 
               if (!state.selectedGame && state.games[0]) {
                 state.selectedGame = state.games[0];
@@ -697,7 +736,6 @@
             setStatus("Choose a game first.", "err");
             return;
           }
-
           loadGameIntoPreview(state.selectedGame);
           setStatus(`Launching “${state.selectedGame.name}” in the launcher preview.`, "ok");
         });
@@ -710,8 +748,11 @@
           openGameInBlank(state.selectedGame);
         });
 
-        fetchGameList();
+        loadAllGames();
       })();
     </script>
   </body>
 </html>
+
+
+        
